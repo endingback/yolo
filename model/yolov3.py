@@ -178,3 +178,59 @@ class YOLOV3(object):
         pred_conf = pred[:, :, :, :, 4:5]
 
         label_xywh = label[:, :, :, :, 0:4]
+respond_bbox = label[:, :, :, :, 4:5]
+        label_prob = label[:, :, :, :, 5:]
+
+        giou = tf.expand_dims(self.bbox_giou(pred_xywh, label_xywh), axis = -1)
+        input_size = tf.cast(input_size, tf.float32)
+
+        bbox_loss_scale = 2.0 - 1.0 * label_xywh[: ,: ,:, :, 2:3] * label_xywh[: ,: ,:, :, 3:4] / input_size
+        #坐标回归为giou
+        giou_loss = respond_bbox * bbox_loss_scale * (1- giou)
+
+        #bbox添加位图
+        iou = self.bbox_iou(pred_xywh[:, :, :, :, np.newaxis, :], bboxes[:, np.newaxis, np.newaxis, np.newaxis, :, :])
+        max_iou = tf.expand_dims(tf.reduce_max(iou, axis=-1), axis=-1)
+
+        respond_bgd = (1.0 - respond_bbox) * tf.cast( max_iou < self.iou_loss_thresh, tf.float32 ) #??
+
+        conf_focal = self.focal(respond_bbox, pred_conf)
+
+        # respond_bbox 是前景掩码，respond_bgd是背景掩码
+        conf_loss = conf_focal * (
+                respond_bbox * tf.nn.sigmoid_cross_entropy_with_logits(labels=respond_bbox, logits=conv_raw_conf)
+                +
+                respond_bgd * tf.nn.sigmoid_cross_entropy_with_logits(labels=respond_bbox, logits=conv_raw_conf)
+        )
+        #分类损失
+        prob_loss = respond_bbox * tf.nn.sigmoid_cross_entropy_with_logits(labels=label_prob, logits=conv_raw_prob)
+
+        giou_loss = tf.reduce_mean(tf.reduce_sum(giou_loss, axis = [1, 2, 3, 4]))
+        conf_loss = tf.reduce_mean(tf.reduce_sum(conf_loss, axis = [1, 2, 3, 4]))
+        prob_loss = tf.reduce_mean(tf.reduce_sum(prob_loss, axis = [1, 2, 3, 4]))
+
+        return giou_loss, conf_loss, prob_loss
+
+    def compute_loss(self, label_sbbox, label_mbbox, label_lbbox, true_sbbox, true_mbbox, true_lbbox):
+        with tf.name_scope("small_box_loss"):
+            loss_sbbox = self.loss_layer(self.conv_sbbox, self.pred_sbbox, label_sbbox, true_sbbox,
+                                         anchors = self.anchors[0], stride=self.strides[0])
+
+        with tf.name_scope("medium_box_loss"):
+            loss_mbbox = self.loss_layer(self.conv_mbbox, self.pred_mbbox, label_mbbox, true_mbbox,
+                                         anchors = self.anchors[1], stride = self.strides[1])
+
+        with tf.name_scope("large_box_loss"):
+            loss_lbbox = self.loss_layer(self.conv_lbbox, self.pred_lbbox, label_lbbox, true_lbbox,
+                                         anchors = self.anchors[2], stride = self.strides[2])
+
+        with tf.name_scope("giou_loss"):
+            giou_loss = loss_sbbox[0] + loss_mbbox[0] + loss_lbbox[0]
+
+        with tf.name_scope("conf_loss"):
+            conf_loss = loss_sbbox[1] + loss_sbbox[1] + loss_sbbox[1]
+
+        with tf.name_scope("prob_loss"):
+            prob_loss = loss_sbbox[2] + loss_sbbox[2] + loss_sbbox[2]
+
+        return giou_loss, conf_loss, prob_loss
